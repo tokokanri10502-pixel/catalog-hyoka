@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api, deviceId } from '../api'
-import { CRITERIA, OVERALL, RANK_KEYS, periodState } from '../types'
+import { CRITERIA, OVERALL, RANK_KEYS, eventLabel, periodState, rankColor } from '../types'
 import type { Company, PublicData, RankKey, Ranks } from '../types'
 import { getType, Shell } from './Home'
+import { isKiosk, nextPerson } from '../kiosk'
 
 type Step = RankKey | 'comment' | 'confirm'
 const STEPS: Step[] = [...RANK_KEYS, 'comment', 'confirm']
@@ -58,20 +59,28 @@ export function Answer({ eventId }: { eventId: string }) {
   const back = <a className="btn btn-ghost" href="#/">催事一覧へ戻る</a>
 
   if (!event || companies.length < 2) return <Shell><p className="card">この催事は現在受付していません。</p>{back}</Shell>
-  if (already && !sent) return <Shell title={event.name}><p className="card center">この催事は回答済みです。ありがとうございました。</p>{back}</Shell>
+  if (!event.issued) return <Shell title={eventLabel(event)}><p className="card center">この催事のカタログはまだ発行されていません。<br />発行後に回答できるようになります。</p>{back}</Shell>
+  if (already && !sent) return <Shell title={eventLabel(event)}><p className="card center">この催事は回答済みです。ありがとうございました。</p>{back}</Shell>
   const ps = periodState(data.settings)
   if (ps !== 'open' && !sent)
-    return <Shell title={event.name}><p className="card center">{ps === 'before' ? 'まだ受付開始前です。' : '受付は終了しました。'}</p>{back}</Shell>
+    return <Shell title={eventLabel(event)}><p className="card center">{ps === 'before' ? 'まだ受付開始前です。' : '受付は終了しました。'}</p>{back}</Shell>
 
   if (sent) {
     return (
-      <Shell title={event.name}>
+      <Shell title={eventLabel(event)}>
         <section className="card done">
           <div className="done-mark">✓</div>
           <h2 className="h2">送信しました</h2>
           <p>ご回答ありがとうございました。</p>
         </section>
-        <a className="btn btn-primary btn-block" href="#/">ほかの催事も回答する</a>
+        {isKiosk() ? (
+          <div className="kiosk-actions">
+            <a className="btn btn-ghost btn-block" href="#/">続けて、ほかの催事も回答する</a>
+            <button className="btn btn-primary btn-block btn-next" onClick={nextPerson}>回答を終えて、次の方へ</button>
+          </div>
+        ) : (
+          <a className="btn btn-primary btn-block" href="#/">ほかの催事も回答する</a>
+        )}
       </Shell>
     )
   }
@@ -103,7 +112,7 @@ export function Answer({ eventId }: { eventId: string }) {
   }
 
   return (
-    <Shell title={event.name}>
+    <Shell title={eventLabel(event)}>
       <div className="progress">
         <div className="progress-bar" style={{ width: `${((step + 1) / STEPS.length) * 100}%` }} />
       </div>
@@ -115,7 +124,10 @@ export function Answer({ eventId }: { eventId: string }) {
         <section className="card">
           <h2 className="q-title">{META[cur].label}</h2>
           <p className="q-hint">{META[cur].hint}</p>
-          <p className="q-how">良いと思う順にタップ（もう一度タップで取り消し）</p>
+          <div className="q-how">
+            <p className="q-how-main">良いと思う順に、社名をタップしてください</p>
+            <p className="q-how-sub">1位から順に番号が付きます。もう一度タップすると取り消せます。</p>
+          </div>
           <RankPicker companies={companies} order={ranks[cur]} onChange={(o) => setRanks({ ...ranks, [cur]: o })} />
         </section>
       )}
@@ -147,7 +159,7 @@ export function Answer({ eventId }: { eventId: string }) {
                 <dd>
                   {ranks[k].map((id, j) => (
                     <span key={id} className="chip">
-                      <b>{j + 1}</b>
+                      <b style={{ color: rankColor(j, ranks[k].length) }}>{j + 1}</b>
                       {byId.get(id)?.label}
                     </span>
                   ))}
@@ -197,14 +209,14 @@ function RankPicker({ companies, order, onChange }: { companies: Company[]; orde
             <button key={c.id} className={`pick ${r >= 0 ? 'is-on' : ''}`} onClick={() => tap(c.id)}>
               <span className="pick-label">{c.label}</span>
               <span className="pick-name">{c.name}</span>
-              <span className="pick-rank">{r >= 0 ? `${r + 1}位` : ''}</span>
+              {r >= 0 && <span className="pick-rank" style={{ background: rankColor(r, companies.length) }}>{r + 1}位</span>}
             </button>
           )
         })}
       </div>
       <div className="order-line">
         {companies.map((_, i) => (
-          <span key={i} className={`slot ${order[i] ? 'is-on' : ''}`}>
+          <span key={i} className={`slot ${order[i] ? 'is-on' : ''}`} style={order[i] ? { borderColor: rankColor(i, companies.length), color: rankColor(i, companies.length) } : undefined}>
             <small>{i + 1}位</small>
             {order[i] ? companies.find((c) => c.id === order[i])?.label : '—'}
           </span>

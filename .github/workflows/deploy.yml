@@ -26,9 +26,9 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          # ブラウザ用の公開値（anon/publishable）。公開して安全。Supabase作成後に書き換える
-          VITE_SUPABASE_URL: https://XXXXXXXX.supabase.co
-          VITE_SUPABASE_ANON_KEY: sb_publishable_XXXXXXXX
+          # ブラウザ用の公開値（anon/publishable）。公開して安全。catalog-hyoka プロジェクト
+          VITE_SUPABASE_URL: https://cqhvqydljtyzxpjddgld.supabase.co
+          VITE_SUPABASE_ANON_KEY: sb_publishable_3TgRPq0LYWvZ8BiWGMxG7A_Nn9Sk3zi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

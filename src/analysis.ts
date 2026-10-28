@@ -1,10 +1,13 @@
 import { CRITERIA, RANK_KEYS, TYPE_LABEL } from './types'
 import type { Company, CritKey, RankKey, RespondentType, ResponseRow } from './types'
 
-export type Filter = 'all' | RespondentType
-export const FILTER_LABEL: Record<Filter, string> = { all: '全体', internal: '社内', external: '社外' }
+const IN = TYPE_LABEL.internal
+const EX = TYPE_LABEL.external
 
-/** 社内・社外いずれかがこの人数未満なら「参考値」扱い */
+export type Filter = 'all' | RespondentType
+export const FILTER_LABEL: Record<Filter, string> = { all: '全体', internal: TYPE_LABEL.internal, external: TYPE_LABEL.external }
+
+/** 東光印刷・取引先いずれかがこの人数未満なら「参考値」扱い */
 export const MIN_N = 10
 
 export interface CompanyStat {
@@ -20,6 +23,7 @@ export interface Core {
   stats: CompanyStat[] // 総合の平均順位順
   rho: Record<CritKey, number | null> // 総合順位との順位相関（回答者ごとのρの平均）
   firstMatch: Record<CritKey, number | null> // 総合1位＝項目1位 の一致率
+  lastMatch: Record<CritKey, number | null> // 総合最下位＝項目最下位 の一致率
   itemCorr: Record<CritKey, Record<CritKey, number | null>>
 }
 
@@ -66,59 +70,88 @@ export function grade(avg: number | null, n: number): 'S' | 'A' | 'B' | 'C' | '-
 }
 export const GRADE_TEXT = { S: 'お手本', A: '強み', B: '標準', C: '課題', '-': '—' } as const
 
-function core(companies: Company[], responses: ResponseRow[]): Core {
+function core(companies: Company[], responses: ResponseRow[], withItemCorr = true): Core {
   const ids = new Set(companies.map((c) => c.id))
-  const clean = (r: ResponseRow, k: RankKey) => (r.ranks[k] ?? []).filter((id) => ids.has(id))
+  // 回答ごとに、評価対象の社だけに絞った並びを先に作っておく（人数が増えても軽く保つため）
+  const orders = responses.map((r) => {
+    const o = {} as Record<RankKey, string[]>
+    RANK_KEYS.forEach((k) => { o[k] = (r.ranks[k] ?? []).filter((id) => ids.has(id)) })
+    return o
+  })
 
-  const stats: CompanyStat[] = companies.map((company) => {
-    const avg = {} as Record<RankKey, number | null>
-    let firstCount = 0
-    const pts: number[] = []
+  // 社ごとの順位の合計・件数
+  const sum = new Map<string, Record<RankKey, { s: number; c: number }>>()
+  const pts = new Map<string, number[]>()
+  const first = new Map<string, number>()
+  companies.forEach((c) => {
+    sum.set(c.id, Object.fromEntries(RANK_KEYS.map((k) => [k, { s: 0, c: 0 }])) as Record<RankKey, { s: number; c: number }>)
+    pts.set(c.id, [])
+    first.set(c.id, 0)
+  })
+  orders.forEach((o) => {
     RANK_KEYS.forEach((k) => {
-      const ps: number[] = []
-      responses.forEach((r) => {
-        const order = clean(r, k)
-        const i = order.indexOf(company.id)
-        if (i < 0) return
-        ps.push(i + 1)
+      o[k].forEach((id, i) => {
+        const a = sum.get(id)![k]
+        a.s += i + 1
+        a.c++
         if (k === 'overall') {
-          pts.push(order.length - i)
-          if (i === 0) firstCount++
+          pts.get(id)!.push(o[k].length - i)
+          if (i === 0) first.set(id, first.get(id)! + 1)
         }
       })
-      avg[k] = mean(ps)
     })
-    return { company, avg, points: mean(pts), firstCount, n: pts.length }
+  })
+  const stats: CompanyStat[] = companies.map((company) => {
+    const sm = sum.get(company.id)!
+    const avg = Object.fromEntries(RANK_KEYS.map((k) => [k, sm[k].c ? sm[k].s / sm[k].c : null])) as Record<RankKey, number | null>
+    const p = pts.get(company.id)!
+    return { company, avg, points: mean(p), firstCount: first.get(company.id)!, n: p.length }
   })
   stats.sort((a, b) => (a.avg.overall ?? 99) - (b.avg.overall ?? 99) || b.firstCount - a.firstCount)
 
+  // 各並びの「社→位置」を1回だけ作る
+  const pos = orders.map((o) => Object.fromEntries(RANK_KEYS.map((k) => [k, new Map(o[k].map((id, i) => [id, i]))])) as Record<RankKey, Map<string, number>>)
+  const corr = (k1: RankKey, k2: RankKey) => {
+    let t = 0
+    let c = 0
+    orders.forEach((o, ri) => {
+      const a = o[k1]
+      const b = pos[ri][k2]
+      const n = a.length
+      if (n < 2 || o[k2].length !== n) return
+      let d2 = 0
+      for (let i = 0; i < n; i++) {
+        const j = b.get(a[i])
+        if (j === undefined) return
+        d2 += (i - j) ** 2
+      }
+      t += 1 - (6 * d2) / (n * (n * n - 1))
+      c++
+    })
+    return c ? t / c : null
+  }
+
   const rho = {} as Core['rho']
   const firstMatch = {} as Core['firstMatch']
+  const lastMatch = {} as Core['lastMatch']
   const itemCorr = {} as Core['itemCorr']
   CRITERIA.forEach(({ key }) => {
-    const rs: number[] = []
-    const fm: number[] = []
-    responses.forEach((r) => {
-      const o = clean(r, 'overall')
-      const c = clean(r, key)
-      const v = spearman(o, c)
-      if (v != null) rs.push(v)
-      if (o.length && c.length) fm.push(o[0] === c[0] ? 1 : 0)
-    })
-    rho[key] = mean(rs)
-    firstMatch[key] = mean(fm)
+    rho[key] = corr('overall', key)
+    const both = orders.filter((o) => o.overall.length && o[key].length)
+    firstMatch[key] = mean(both.map((o) => (o.overall[0] === o[key][0] ? 1 : 0)))
+    lastMatch[key] = mean(both.map((o) => (o.overall[o.overall.length - 1] === o[key][o[key].length - 1] ? 1 : 0)))
     itemCorr[key] = {} as Record<CritKey, number | null>
-    CRITERIA.forEach(({ key: k2 }) => {
-      const xs: number[] = []
-      responses.forEach((r) => {
-        const v = spearman(clean(r, key), clean(r, k2))
-        if (v != null) xs.push(v)
-      })
-      itemCorr[key][k2] = mean(xs)
+  })
+  CRITERIA.forEach(({ key: k1 }, i) => {
+    CRITERIA.forEach(({ key: k2 }, j) => {
+      if (j < i || !withItemCorr) return
+      const v = i === j ? 1 : corr(k1, k2)
+      itemCorr[k1][k2] = v
+      itemCorr[k2][k1] = v
     })
   })
 
-  return { n: responses.length, stats, rho, firstMatch, itemCorr }
+  return { n: responses.length, stats, rho, firstMatch, lastMatch, itemCorr }
 }
 
 const f1 = (v: number | null) => (v == null ? '—' : v.toFixed(1))
@@ -129,10 +162,10 @@ export function analyzeEvent(companies: Company[], allResponses: ResponseRow[], 
   const external = allResponses.filter((r) => r.respondent_type === 'external')
   const target = filter === 'all' ? allResponses : filter === 'internal' ? internal : external
   const c = core(companies, target)
-  const byType = { internal: core(companies, internal), external: core(companies, external) }
+  const byType = { internal: core(companies, internal, false), external: core(companies, external, false) }
   const n = companies.length
 
-  // 社内と社外の評価のズレ（平均順位の差）
+  // 東光印刷と取引先・一般の評価のズレ（平均順位の差）
   const gaps: Gap[] = []
   if (internal.length && external.length) {
     companies.forEach((co) => {
@@ -192,12 +225,12 @@ export function analyzeEvent(companies: Company[], allResponses: ResponseRow[], 
       const sg = gaps.filter((g) => g.company.is_self)[0]
       if (sg && Math.abs(sg.diff) >= 0.8) {
         insights.push(
-          `自社の「${label(sg.key)}」は社内${f1(sg.internal)}位／社外${f1(sg.external)}位で、社外の評価のほうが${sg.diff > 0 ? '低い' : '高い'}。`,
+          `自社の「${label(sg.key)}」は${IN}では${f1(sg.internal)}位／${EX}では${f1(sg.external)}位で、${EX}の評価のほうが${sg.diff > 0 ? '低い' : '高い'}。`,
         )
       }
     }
     if (internal.length < MIN_N || external.length < MIN_N) {
-      insights.push(`※ 社内${internal.length}人・社外${external.length}人。${MIN_N}人未満の区分は参考値として見てください。`)
+      insights.push(`※ ${IN}${internal.length}人・${EX}${external.length}人。${MIN_N}人未満の区分は参考値として見てください。`)
     }
   }
 

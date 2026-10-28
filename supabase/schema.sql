@@ -10,17 +10,20 @@ create extension if not exists pgcrypto with schema extensions;
 create table if not exists settings (
   id int primary key default 1 check (id = 1),
   title text not null default '予約カタログ評価',
+  current_year int not null default extract(year from now())::int, -- 回答を受け付ける年
   start_at timestamptz,
   end_at timestamptz
 );
 insert into settings (id) values (1) on conflict do nothing;
 
--- 催事
+-- 催事（年ごとに登録。翌年は管理画面で前年からコピー）
 create table if not exists events (
   id uuid primary key default gen_random_uuid(),
+  year int not null,
   name text not null,
   sort int not null default 0,
-  active boolean not null default true,
+  active boolean not null default true,  -- 回答画面に表示するか
+  issued boolean not null default true,  -- カタログ発行済みか（false の間は「未発行」と表示し回答不可）
   created_at timestamptz not null default now()
 );
 
@@ -62,7 +65,8 @@ alter table admin_secret enable row level security;
 drop policy if exists "read settings" on settings;
 create policy "read settings" on settings for select to anon, authenticated using (true);
 drop policy if exists "read active events" on events;
-create policy "read active events" on events for select to anon, authenticated using (active);
+create policy "read active events" on events for select to anon, authenticated
+  using (active and year = (select current_year from settings where id = 1));
 drop policy if exists "read companies" on companies;
 create policy "read companies" on companies for select to anon, authenticated using (true);
 -- responses / admin_secret にはポリシーを作らない → 直接の読み書きは不可。下の関数経由のみ。
@@ -83,7 +87,12 @@ begin
   select * into s from settings where id = 1;
   if s.start_at is not null and now() < s.start_at then raise exception '受付開始前です'; end if;
   if s.end_at is not null and now() > s.end_at then raise exception '受付は終了しました'; end if;
-  if not exists (select 1 from events where id = p_event and active) then raise exception 'この催事は受付していません'; end if;
+  if not exists (select 1 from events where id = p_event and active and year = s.current_year) then
+    raise exception 'この催事は受付していません';
+  end if;
+  if not exists (select 1 from events where id = p_event and issued) then
+    raise exception 'この催事のカタログはまだ発行されていません';
+  end if;
   if p_type not in ('internal','external') then raise exception '回答者区分が不正です'; end if;
   if coalesce(length(p_device),0) < 8 then raise exception '端末IDが不正です'; end if;
 
@@ -122,7 +131,7 @@ begin
   perform _check_pw(p_pw);
   return jsonb_build_object(
     'settings', (select to_jsonb(s) from settings s where id = 1),
-    'events', coalesce((select jsonb_agg(to_jsonb(e) order by e.sort, e.created_at) from events e), '[]'),
+    'events', coalesce((select jsonb_agg(to_jsonb(e) order by e.year, e.sort, e.created_at) from events e), '[]'),
     'companies', coalesce((select jsonb_agg(to_jsonb(c) order by c.sort) from companies c), '[]'),
     'responses', coalesce((select jsonb_agg(jsonb_build_object(
         'id', r.id, 'event_id', r.event_id, 'respondent_type', r.respondent_type,
@@ -131,24 +140,39 @@ begin
   );
 end $$;
 
-create or replace function admin_save_settings(p_pw text, p_title text, p_start timestamptz, p_end timestamptz)
+create or replace function admin_save_settings(p_pw text, p_title text, p_year int, p_start timestamptz, p_end timestamptz)
 returns void language plpgsql security definer set search_path = public as $$
 begin
   perform _check_pw(p_pw);
-  update settings set title = p_title, start_at = p_start, end_at = p_end where id = 1;
+  update settings set title = p_title, current_year = p_year, start_at = p_start, end_at = p_end where id = 1;
 end $$;
 
-create or replace function admin_save_event(p_pw text, p_id uuid, p_name text, p_sort int, p_active boolean)
+create or replace function admin_save_event(p_pw text, p_id uuid, p_year int, p_name text, p_sort int, p_active boolean, p_issued boolean)
 returns uuid language plpgsql security definer set search_path = public as $$
 declare new_id uuid;
 begin
   perform _check_pw(p_pw);
   if p_id is null then
-    insert into events (name, sort, active) values (p_name, p_sort, p_active) returning id into new_id;
+    insert into events (year, name, sort, active, issued) values (p_year, p_name, p_sort, p_active, p_issued) returning id into new_id;
     return new_id;
   end if;
-  update events set name = p_name, sort = p_sort, active = p_active where id = p_id;
+  update events set name = p_name, sort = p_sort, active = p_active, issued = p_issued where id = p_id;
   return p_id;
+end $$;
+
+-- 前年の催事と社をまとめてコピー（回答はコピーしない）
+create or replace function admin_copy_year(p_pw text, p_from int, p_to int)
+returns void language plpgsql security definer set search_path = public as $$
+declare e events; new_id uuid;
+begin
+  perform _check_pw(p_pw);
+  if exists (select 1 from events where year = p_to) then raise exception '%年はすでに登録があります', p_to; end if;
+  for e in select * from events where year = p_from order by sort loop
+    -- 翌年分はカタログがまだ無いので「未発行」で作る
+    insert into events (year, name, sort, active, issued) values (p_to, e.name, e.sort, true, false) returning id into new_id;
+    insert into companies (event_id, label, name, is_self, sort)
+      select new_id, label, name, is_self, sort from companies where event_id = e.id;
+  end loop;
 end $$;
 
 create or replace function admin_delete_event(p_pw text, p_id uuid)
@@ -194,13 +218,24 @@ begin
 end $$;
 
 -- ---------------------------------------------------------
+-- 公開範囲（回答画面は読み取りと関数呼び出しだけ）
+-- ---------------------------------------------------------
+grant usage on schema public to anon, authenticated;
+grant select on settings, events, companies to anon, authenticated;
+grant execute on function submit_response(uuid, text, text, jsonb, text), get_answered(text),
+  admin_load(text), admin_save_settings(text, text, int, timestamptz, timestamptz),
+  admin_save_event(text, uuid, int, text, int, boolean, boolean), admin_copy_year(text, int, int),
+  admin_delete_event(text, uuid), admin_save_companies(text, uuid, jsonb),
+  admin_delete_response(text, uuid), admin_change_password(text, text)
+  to anon, authenticated;
+
+-- ---------------------------------------------------------
 -- 初期データ
 -- ---------------------------------------------------------
--- ▼ 最初の管理パスワード（'kari-pass' を好きな文字に変えてから Run。後で管理画面から変更可）
-insert into admin_secret (id, pw_hash) values (1, extensions.crypt('kari-pass', extensions.gen_salt('bf')))
-on conflict (id) do nothing;
+-- ▼ 管理パスワードは別に設定する（supabase/set_password.sql）
 
 -- ▼ 催事の初期登録（不要なら管理画面で削除・追加できます）
-insert into events (name, sort)
-select * from (values ('おせち',1),('クリスマス',2),('土用の丑',3),('母の日・父の日',4),('ボジョレーヌーボー',5)) v(name, sort)
+insert into events (year, name, sort)
+select (select current_year from settings where id = 1), name, sort
+from (values ('節分',1),('母の日・父の日',2),('土用の丑',3),('ボジョレーヌーボー',4),('クリスマス',5),('おせち',6)) v(name, sort)
 where not exists (select 1 from events);

@@ -10,7 +10,8 @@ export interface Api {
   submit(p: { eventId: string; type: RespondentType; deviceId: string; ranks: Ranks; comment: string }): Promise<void>
   adminLoad(pw: string): Promise<AdminData>
   adminSaveSettings(pw: string, s: Settings): Promise<void>
-  adminSaveEvent(pw: string, e: { id: string | null; name: string; sort: number; active: boolean }): Promise<string>
+  adminSaveEvent(pw: string, e: { id: string | null; year: number; name: string; sort: number; active: boolean; issued: boolean }): Promise<string>
+  adminCopyYear(pw: string, from: number, to: number): Promise<void>
   adminDeleteEvent(pw: string, id: string): Promise<void>
   adminSaveCompanies(pw: string, eventId: string, rows: CompanyInput[]): Promise<void>
   adminDeleteResponse(pw: string, id: string): Promise<void>
@@ -33,7 +34,7 @@ function supabaseApi(sb: SupabaseClient): Api {
       ])
       const err = s.error || e.error || c.error
       if (err) throw new Error(err.message)
-      const events = e.data ?? []
+      const events = (e.data ?? []).filter((x) => x.year === s.data.current_year)
       const ids = new Set(events.map((x) => x.id))
       return { settings: s.data, events, companies: (c.data ?? []).filter((x) => ids.has(x.event_id)) }
     },
@@ -42,9 +43,10 @@ function supabaseApi(sb: SupabaseClient): Api {
       rpc('submit_response', { p_event: p.eventId, p_type: p.type, p_device: p.deviceId, p_ranks: p.ranks, p_comment: p.comment }),
     adminLoad: (pw) => rpc<AdminData>('admin_load', { p_pw: pw }),
     adminSaveSettings: (pw, s) =>
-      rpc('admin_save_settings', { p_pw: pw, p_title: s.title, p_start: s.start_at, p_end: s.end_at }),
+      rpc('admin_save_settings', { p_pw: pw, p_title: s.title, p_year: s.current_year, p_start: s.start_at, p_end: s.end_at }),
     adminSaveEvent: (pw, e) =>
-      rpc<string>('admin_save_event', { p_pw: pw, p_id: e.id, p_name: e.name, p_sort: e.sort, p_active: e.active }),
+      rpc<string>('admin_save_event', { p_pw: pw, p_id: e.id, p_year: e.year, p_name: e.name, p_sort: e.sort, p_active: e.active, p_issued: e.issued }),
+    adminCopyYear: (pw, from, to) => rpc('admin_copy_year', { p_pw: pw, p_from: from, p_to: to }),
     adminDeleteEvent: (pw, id) => rpc('admin_delete_event', { p_pw: pw, p_id: id }),
     adminSaveCompanies: (pw, eventId, rows) => rpc('admin_save_companies', { p_pw: pw, p_event: eventId, p_rows: rows }),
     adminDeleteResponse: (pw, id) => rpc('admin_delete_response', { p_pw: pw, p_id: id }),
@@ -53,7 +55,7 @@ function supabaseApi(sb: SupabaseClient): Api {
 }
 
 // ---- デモモード（Supabase未設定時。データはこのブラウザ内だけに保存） ----
-const DEMO_KEY = 'ck_demo_v1'
+const DEMO_KEY = 'ck_demo_v3'
 
 export function uid(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
@@ -84,7 +86,7 @@ function demoApi(): Api {
     mode: 'demo',
     async getPublic() {
       const s = load()
-      const events = s.events.filter((e) => e.active).sort((a, b) => a.sort - b.sort)
+      const events = s.events.filter((e) => e.active && e.year === s.settings.current_year).sort((a, b) => a.sort - b.sort)
       const ids = new Set(events.map((e) => e.id))
       return { settings: s.settings, events, companies: s.companies.filter((c) => ids.has(c.event_id)) }
     },
@@ -95,6 +97,8 @@ function demoApi(): Api {
     async submit(p) {
       const s = load()
       if (periodState(s.settings) !== 'open') throw new Error('受付期間外です')
+      if (!s.events.some((e) => e.id === p.eventId && e.active && e.year === s.settings.current_year)) throw new Error('この催事は受付していません')
+      if (!s.events.some((e) => e.id === p.eventId && e.issued)) throw new Error('この催事のカタログはまだ発行されていません')
       const answered = Object.entries(s.device).some(([rid, d]) => d === p.deviceId && s.responses.find((r) => r.id === rid)?.event_id === p.eventId)
       if (answered) throw new Error('この催事は回答済みです')
       const id = uid()
@@ -105,7 +109,7 @@ function demoApi(): Api {
     async adminLoad(pw) {
       const s = load()
       auth(s, pw)
-      return { settings: s.settings, events: [...s.events].sort((a, b) => a.sort - b.sort), companies: [...s.companies].sort((a, b) => a.sort - b.sort), responses: s.responses }
+      return { settings: s.settings, events: [...s.events].sort((a, b) => a.year - b.year || a.sort - b.sort), companies: [...s.companies].sort((a, b) => a.sort - b.sort), responses: s.responses }
     },
     async adminSaveSettings(pw, st) {
       const s = load(); auth(s, pw); s.settings = st; save(s)
@@ -114,13 +118,23 @@ function demoApi(): Api {
       const s = load(); auth(s, pw)
       if (!e.id) {
         const id = uid()
-        s.events.push({ id, name: e.name, sort: e.sort, active: e.active })
+        s.events.push({ id, year: e.year, name: e.name, sort: e.sort, active: e.active, issued: e.issued })
         save(s)
         return id
       }
-      s.events = s.events.map((x) => (x.id === e.id ? { ...x, name: e.name, sort: e.sort, active: e.active } : x))
+      s.events = s.events.map((x) => (x.id === e.id ? { ...x, year: e.year, name: e.name, sort: e.sort, active: e.active, issued: e.issued } : x))
       save(s)
       return e.id
+    },
+    async adminCopyYear(pw, from, to) {
+      const s = load(); auth(s, pw)
+      if (s.events.some((e) => e.year === to)) throw new Error(`${to}年はすでに登録があります`)
+      s.events.filter((e) => e.year === from).forEach((e) => {
+        const id = uid()
+        s.events.push({ ...e, id, year: to, active: true, issued: false })
+        s.companies.filter((c) => c.event_id === e.id).forEach((c) => s.companies.push({ ...c, id: uid(), event_id: id }))
+      })
+      save(s)
     },
     async adminDeleteEvent(pw, id) {
       const s = load(); auth(s, pw)

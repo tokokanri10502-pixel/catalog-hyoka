@@ -1,6 +1,12 @@
 export type RespondentType = 'internal' | 'external'
 
-export const TYPE_LABEL: Record<RespondentType, string> = { internal: '社内', external: '社外' }
+// 分析・管理画面での呼び方
+export const TYPE_LABEL: Record<RespondentType, string> = { internal: '東光印刷', external: '取引先・一般' }
+// 回答画面での呼び方
+export const TYPE_LONG: Record<RespondentType, { title: string; sub: string }> = {
+  internal: { title: '東光印刷の社員', sub: '営業・制作ほか、社内の方' },
+  external: { title: 'お取引先・一般の方', sub: 'スーパー各社のご担当者さま、その他の方' },
+}
 
 export type CritKey = 'cover' | 'mainpage' | 'product' | 'sizzle' | 'copy' | 'tone'
 export type RankKey = 'overall' | CritKey
@@ -20,8 +26,8 @@ export const OVERALL = { key: 'overall' as const, label: '総合評価', short: 
 
 export const RANK_KEYS: RankKey[] = ['overall', ...CRITERIA.map((c) => c.key)]
 
-export interface Settings { title: string; start_at: string | null; end_at: string | null }
-export interface EventRow { id: string; name: string; sort: number; active: boolean }
+export interface Settings { title: string; current_year: number; start_at: string | null; end_at: string | null }
+export interface EventRow { id: string; year: number; name: string; sort: number; active: boolean; issued: boolean }
 export interface Company { id: string; event_id: string; label: string; name: string; is_self: boolean; sort: number }
 export type Ranks = Record<RankKey, string[]>
 export interface ResponseRow {
@@ -32,6 +38,15 @@ export interface ResponseRow {
   comment: string
   created_at: string
 }
+
+/** 順位の色：1位＝緑 → 最下位＝青 のグラデーション（i は0始まり） */
+export function rankColor(i: number, n: number) {
+  const t = n > 1 ? i / (n - 1) : 0
+  return `hsl(${Math.round(150 + t * 72)}, 62%, ${Math.round(36 + t * 4)}%)`
+}
+
+/** 催事の表示名（例：おせち 2026年） */
+export const eventLabel = (e: { name: string; year: number }) => `${e.name} ${e.year}年`
 
 export interface PublicData { settings: Settings; events: EventRow[]; companies: Company[] }
 export interface AdminData extends PublicData { responses: ResponseRow[] }
