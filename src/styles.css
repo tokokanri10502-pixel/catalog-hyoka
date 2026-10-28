@@ -87,6 +87,7 @@ a { color: inherit; }
 .btn:disabled { opacity: .35; cursor: default; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-ghost { border-color: var(--line); }
+.btn-danger { background: var(--alert); border-color: var(--alert); color: #fff; }
 .btn-block { display: block; width: 100%; }
 .btn-big { font-size: 20px; padding: 22px 0; font-family: var(--sans); }
 .type-btn {

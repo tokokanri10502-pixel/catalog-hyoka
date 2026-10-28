@@ -473,10 +473,31 @@ function ResponsesTab({ pw, data, all, year, reload }: P) {
   const [ev, setEv] = useState(data.events[0]?.id ?? '')
   const list = data.responses.filter((r) => r.event_id === ev).slice().reverse()
   const byId = new Map(data.companies.map((c) => [c.id, c]))
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const tests = list.filter((r) => r.comment.startsWith('【テスト】'))
   const del = async (id: string) => {
     if (!confirm('この回答を削除しますか？（元に戻せません）')) return
     await api.adminDeleteResponse(pw, id)
     await reload()
+  }
+  const toggle = (id: string, on: boolean) => {
+    const s = new Set(picked)
+    if (on) s.add(id)
+    else s.delete(id)
+    setPicked(s)
+  }
+  const delPicked = async () => {
+    const ids = list.filter((r) => picked.has(r.id)).map((r) => r.id)
+    if (!ids.length || !confirm(`選んだ${ids.length}件の回答を削除しますか？（元に戻せません）`)) return
+    setBusy(true)
+    try {
+      for (const id of ids) await api.adminDeleteResponse(pw, id)
+    } finally {
+      setPicked(new Set())
+      setBusy(false)
+      await reload()
+    }
   }
   return (
     <div className="stack">
@@ -497,17 +518,29 @@ function ResponsesTab({ pw, data, all, year, reload }: P) {
         </table>
       </section>
       <div className="row">
-        <select className="input select" value={ev} onChange={(e) => setEv(e.target.value)}>
+        <select className="input select" value={ev} onChange={(e) => { setEv(e.target.value); setPicked(new Set()) }}>
           {data.events.map((e) => <option key={e.id} value={e.id}>{eventLabel(e)}</option>)}
         </select>
         <span className="muted small">{list.length}件（テスト回答・誤回答はここで削除できます）</span>
+        <span className="spacer" />
+        {tests.length > 0 && (
+          <button className="btn btn-ghost" onClick={() => setPicked(new Set(tests.map((r) => r.id)))}>「【テスト】」の回答を選ぶ（{tests.length}件）</button>
+        )}
+        <button className="btn btn-danger" disabled={busy || !picked.size} onClick={delPicked}>
+          {busy ? '削除中…' : `選んだ${picked.size}件を削除`}
+        </button>
       </div>
       <section className="card">
         <table className="table resp">
-          <thead><tr><th>日時</th><th>区分</th><th>総合順位</th><th>ひとこと</th><th /></tr></thead>
+          <thead><tr>
+            <th><input type="checkbox" aria-label="すべて選ぶ" checked={list.length > 0 && picked.size === list.length}
+              onChange={(e) => setPicked(e.target.checked ? new Set(list.map((r) => r.id)) : new Set())} /></th>
+            <th>日時</th><th>区分</th><th>総合順位</th><th>ひとこと</th><th />
+          </tr></thead>
           <tbody>
             {list.map((r) => (
               <tr key={r.id}>
+                <td><input type="checkbox" aria-label="選ぶ" checked={picked.has(r.id)} onChange={(e) => toggle(r.id, e.target.checked)} /></td>
                 <td className="nowrap">{fmtDate(r.created_at)}</td>
                 <td>{TYPE_LABEL[r.respondent_type]}</td>
                 <td className="nowrap">{r.ranks.overall.map((id) => byId.get(id)?.label ?? '?').join(' > ')}</td>
