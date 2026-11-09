@@ -6,7 +6,9 @@ import { getType, Shell } from './Home'
 import { isKiosk, nextPerson } from '../kiosk'
 
 type Step = RankKey | 'comment' | 'confirm'
-const STEPS: Step[] = [...RANK_KEYS, 'comment', 'confirm']
+// 回答画面では各項目を先に聞き、総合評価は最後に聞く
+const ASK_KEYS: RankKey[] = [...CRITERIA.map((c) => c.key), 'overall']
+const STEPS: Step[] = [...ASK_KEYS, 'comment', 'confirm']
 const META: Record<RankKey, { label: string; hint: string }> = {
   overall: OVERALL,
   ...Object.fromEntries(CRITERIA.map((c) => [c.key, c])),
@@ -151,7 +153,7 @@ export function Answer({ eventId }: { eventId: string }) {
         <section className="card">
           <h2 className="q-title">回答内容の確認</h2>
           <dl className="confirm">
-            {RANK_KEYS.map((k, i) => (
+            {ASK_KEYS.map((k, i) => (
               <div key={k} className="confirm-row">
                 <dt>
                   <button className="link" onClick={() => setStep(i)}>{k === 'overall' ? '総合' : CRITERIA.find((c) => c.key === k)!.short}</button>
